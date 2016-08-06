@@ -19,8 +19,11 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/epoll.h>
-
+#include <sys/select.h>
+#include <sys/inotify.h>
 #include <linux/input.h>
+#include <time.h>
+
 
 #include "minui.h"
 
@@ -42,6 +45,8 @@ struct fd_info {
 static int epollfd;
 static struct epoll_event polledevents[MAX_DEVICES + MAX_MISC_FDS];
 static int npolledevents;
+static int ifd,wfd;
+static ev_callback input_cb_save;
 
 static struct fd_info ev_fdinfo[MAX_DEVICES + MAX_MISC_FDS];
 
@@ -57,6 +62,7 @@ int ev_init(ev_callback input_cb, void *data)
     struct epoll_event ev;
     bool epollctlfail = false;
 
+	input_cb_save = input_cb;
     epollfd = epoll_create(MAX_DEVICES + MAX_MISC_FDS);
     if (epollfd == -1)
         return -1;
@@ -209,3 +215,70 @@ int ev_sync_key_state(ev_set_key_callback set_key_cb, void *data)
 
     return 0;
 }
+
+int ev_select(void)
+{
+	int eventnum, i, length;
+	fd_set readset;
+	char buffer[512];
+	int event_pos = 0;
+	struct inotify_event *event;
+	char ne_path[20];
+	int new_fd;
+
+	FD_ZERO(&readset);
+	FD_SET(ifd, &readset);
+
+	eventnum = select(ifd+1, &readset, NULL, NULL, NULL);
+	if(eventnum > 0){
+		if(FD_ISSET(ifd, &readset))
+			length = read(ifd, buffer, sizeof(buffer));
+		else{
+			fprintf(stderr," select ifd error\n");
+			return -1;
+		}
+		while((length >= (int)sizeof(*event)) && (event_pos < length)){
+			   event = (struct inotify_event *)(buffer + event_pos);
+			   if(event->len) {
+				   if(event->mask & IN_CREATE) {
+					   snprintf(ne_path, sizeof(ne_path), "/dev/input/%s", event->name);
+					   fprintf(stderr," ne_path = %s \n",ne_path);
+
+					   new_fd = open(ne_path, O_RDONLY);
+					   if(new_fd < 0){
+						   fprintf(stderr,"open %s error, errno:%d\n",ne_path,errno);
+						   return -1;
+					   }
+					   if(ev_add_fd(new_fd, input_cb_save, NULL)){
+						   fprintf(stderr,"ev_add_fd error\n");
+						   return -1;
+					   }
+				   }
+
+				   event_pos +=  (int)sizeof(*event) + event->len;
+
+			   } else {
+				   fprintf(stderr,"get inotify event error\n");
+			   }
+		}
+
+	}
+
+	return 0;
+}
+
+int ev_add_inotify(void)
+{
+	if((ifd = inotify_init()) < 0) {
+		fprintf(stderr,"inotify_init failed\n");
+		return -1;
+	}
+
+	wfd = inotify_add_watch(ifd, "/dev/input", IN_CREATE);
+	if(wfd < 0){
+		fprintf(stderr,"inotify_add_watch failed\n");
+		return -1;
+	}
+	return 0;
+}
+

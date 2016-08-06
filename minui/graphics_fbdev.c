@@ -40,10 +40,15 @@ static void fbdev_exit(minui_backend*);
 static GRSurface gr_framebuffer[2];
 static bool double_buffered;
 static GRSurface* gr_draw = NULL;
+static GRSurface temp_draw;
+static int data_len;
 static int displayed_buffer;
 
 static struct fb_var_screeninfo vi;
 static int fb_fd = -1;
+
+#define ROTATION BOARD_RECOVERY_ROTATION
+#define swap(a, b) do { typeof(a) __tmp = (a); (a) = (b); (b) = __tmp; } while (0)
 
 static minui_backend my_backend = {
     .init = fbdev_init,
@@ -67,20 +72,29 @@ static void fbdev_blank(minui_backend* backend __unused, bool blank)
 
 static void set_displayed_framebuffer(unsigned n)
 {
+    int rotation = ROTATION;
+
     if (n > 1 || !double_buffered) return;
 
     vi.yres_virtual = gr_framebuffer[0].height * 2;
     vi.yoffset = n * gr_framebuffer[0].height;
+    if (90 == rotation || 270 == rotation)
+        swap(vi.xres, vi.yres);
+    vi.yres_virtual = vi.yres * 2;
+    vi.yoffset = n * vi.yres;
     vi.bits_per_pixel = gr_framebuffer[0].pixel_bytes * 8;
     if (ioctl(fb_fd, FBIOPUT_VSCREENINFO, &vi) < 0) {
         perror("active fb swap failed");
     }
+    if (90 == rotation || 270 == rotation)
+        swap(vi.xres, vi.yres);
     displayed_buffer = n;
 }
 
 static gr_surface fbdev_init(minui_backend* backend) {
     int fd;
     void *bits;
+    int rotation = ROTATION;
 
     struct fb_fix_screeninfo fi;
 
@@ -113,6 +127,7 @@ static gr_surface fbdev_init(minui_backend* backend) {
     // If you have a device that actually *needs* another pixel format
     // (ie, BGRX, or 565), patches welcome...
 
+    printf("aw :  rotation = %d\n",rotation);
     printf("fb0 reports (possibly inaccurate):\n"
            "  vi.bits_per_pixel = %d\n"
            "  vi.red.offset   = %3d   .length = %3d\n"
@@ -131,6 +146,13 @@ static gr_surface fbdev_init(minui_backend* backend) {
     }
 
     memset(bits, 0, fi.smem_len);
+
+    if (90 == rotation || 270 == rotation) {
+        swap(vi.xres, vi.yres);
+        fi.line_length = vi.xres * (vi.bits_per_pixel / 8);
+    }
+    data_len = vi.xres  *  vi.yres *  (vi.bits_per_pixel / 8);
+    temp_draw.data = malloc(data_len);
 
     gr_framebuffer[0].width = vi.xres;
     gr_framebuffer[0].height = vi.yres;
@@ -177,7 +199,64 @@ static gr_surface fbdev_init(minui_backend* backend) {
     return gr_draw;
 }
 
+static void* rotate_90(void *_dst,const void *_src) {
+    int pixelSize = vi.bits_per_pixel / 8, size;
+    unsigned char *dst = _dst;
+    const unsigned char *src = _src;
+    int xCod;
+    int yCod;
+    int sPosition = 0;
+    int row_length = vi.xres * pixelSize;
+    for (yCod = 0; yCod < vi.xres; yCod ++) {
+        for (xCod = 0; xCod < vi.yres; xCod ++) {
+            size = pixelSize;
+            sPosition = row_length * (vi.yres - xCod - 1) + (yCod * pixelSize);
+            while (size-- > 0) {
+                *dst++ = src[sPosition ++];
+            }
+        }
+    }
+    return _dst;
+}
+
+static void* rotate_180(void *_dst,const void *_src) {
+    int pixelSize = vi.bits_per_pixel / 8, size, step = vi.xres * vi.yres;
+    unsigned char *dst = _dst;
+    const unsigned char *src = _src + (step * pixelSize);
+    while(step-- > 0) {
+        size = pixelSize;
+        src -= size;
+        while(size-- > 0) {
+            *dst++ = *src++;
+        }
+        src -= pixelSize;
+    }
+    return _dst;
+}
+
+static void* rotate_270(void *_dst,const void *_src) {
+    int pixelSize = vi.bits_per_pixel / 8, size;
+    unsigned char *dst = _dst;
+    const unsigned char *src = _src;
+    int xCod;
+    int yCod;
+    int sPosition = 0;
+    int row_length = vi.xres * pixelSize;
+    for (yCod = 0; yCod < vi.xres; yCod ++) {
+        for (xCod = 0; xCod < vi.yres; xCod ++) {
+            size = pixelSize;
+            sPosition = row_length * xCod + (vi.xres-yCod -1) * pixelSize;
+            while (size-- > 0) {
+                *dst++ = src[sPosition ++];
+            }
+        }
+    }
+    return _dst;
+}
+
 static gr_surface fbdev_flip(minui_backend* backend __unused) {
+    int rotation = ROTATION;
+
     if (double_buffered) {
 #if defined(RECOVERY_BGRA)
         // In case of BGRA, do some byte swapping
@@ -195,6 +274,24 @@ static gr_surface fbdev_flip(minui_backend* backend __unused) {
         // then flip the driver so we're displaying the other buffer
         // instead.
         gr_draw = gr_framebuffer + displayed_buffer;
+
+        if (rotation != 0) {
+            memcpy(temp_draw.data, gr_framebuffer[1-displayed_buffer].data, data_len);
+            switch (rotation) {
+                case 90:
+                    rotate_90(gr_framebuffer[1-displayed_buffer].data, temp_draw.data);
+                    break;
+                case 180:
+                    rotate_180(gr_framebuffer[1-displayed_buffer].data, temp_draw.data);
+                    break;
+                case 270:
+                    rotate_270(gr_framebuffer[1-displayed_buffer].data, temp_draw.data);
+                    break;
+                default:
+                    break;
+            }
+        }
+
         set_displayed_framebuffer(1-displayed_buffer);
     } else {
         // Copy from the in-memory surface to the framebuffer.

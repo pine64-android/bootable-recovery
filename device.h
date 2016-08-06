@@ -65,7 +65,7 @@ class Device {
     //   - invoke a specific action (a menu position: any non-negative number)
     virtual int HandleMenuKey(int key, int visible) = 0;
 
-    enum BuiltinAction { NO_ACTION, REBOOT, APPLY_EXT,
+    enum BuiltinAction { NO_ACTION, REBOOT, APPLY_EXT, APPLY_TF, APPLY_USB,
                          APPLY_CACHE,   // APPLY_CACHE is deprecated; has no effect
                          APPLY_ADB_SIDELOAD, WIPE_DATA, WIPE_CACHE,
                          REBOOT_BOOTLOADER, SHUTDOWN, READ_RECOVERY_LASTLOG };
@@ -104,6 +104,13 @@ class Device {
     // NULL-terminated).  The menu_position passed to InvokeMenuItem
     // will correspond to the indexes into this array.
     virtual const char* const* GetMenuItems() = 0;
+
+    // Return extnernal storage path
+    virtual const char* GetExternalStoragePath() = 0;
+    // Retrun extsd storage path
+    virtual const char* GetExtsdStoragePath() = 0;
+    // Retrun usbhost storage path
+    virtual const char* GetUsbhostStoragePath() = 0;
 };
 
 // The device-specific library must define this function (or the

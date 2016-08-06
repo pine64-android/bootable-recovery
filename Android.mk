@@ -30,6 +30,7 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := \
+    insmodctp.cpp \
     recovery.cpp \
     bootloader.cpp \
     install.cpp \
@@ -90,6 +91,16 @@ ifeq ($(TARGET_RECOVERY_UI_LIB),)
 else
   LOCAL_STATIC_LIBRARIES += $(TARGET_RECOVERY_UI_LIB)
 endif
+ifeq ($(SW_BOARD_TOUCH_RECOVERY),true)
+LOCAL_CPPFLAGS += -DBOARD_TOUCH_RECOVERY
+endif
+
+ifneq ($(SW_BOARD_RECOVERY_ROTATION),)
+    BOARD_RECOVERY_ROTATION := $(SW_BOARD_RECOVERY_ROTATION)
+else
+    BOARD_RECOVERY_ROTATION := 0
+endif
+LOCAL_CPPFLAGS += -DBOARD_RECOVERY_ROTATION=$(BOARD_RECOVERY_ROTATION)
 
 LOCAL_C_INCLUDES += system/extras/ext4_utils
 LOCAL_C_INCLUDES += external/openssl/include
@@ -122,11 +133,13 @@ LOCAL_STATIC_LIBRARIES := \
     libcutils \
     libstdc++ \
     libc
+LOCAL_CPPFLAGS += -DBOARD_RECOVERY_ROTATION=$(BOARD_RECOVERY_ROTATION)
 include $(BUILD_EXECUTABLE)
 
 
 include $(LOCAL_PATH)/minui/Android.mk \
     $(LOCAL_PATH)/minzip/Android.mk \
+    $(LOCAL_PATH)/burnboot/Android.mk \
     $(LOCAL_PATH)/minadbd/Android.mk \
     $(LOCAL_PATH)/mtdutils/Android.mk \
     $(LOCAL_PATH)/tests/Android.mk \

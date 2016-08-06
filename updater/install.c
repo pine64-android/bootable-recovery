@@ -47,6 +47,7 @@
 #include "updater.h"
 #include "install.h"
 #include "tune2fs.h"
+#include "burnboot/BurnBoot.h"
 
 #ifdef USE_EXT4
 #include "make_ext4fs.h"
@@ -1540,6 +1541,114 @@ Value* EnableRebootFn(const char* name, State* state, int argc, Expr* argv[]) {
     return StringValue(strdup("t"));
 }
 
+Value* BurnBootFn(const char* name, State* state, int argc, Expr* argv[]) {
+    if (argc != 1) {
+        return ErrorAbort(state, "%s() expects 1 arg, got %d", name, argc);
+    }
+
+    char* boot;
+
+    if (ReadArgs(state, argv, 1, &boot) < 0) return NULL;
+
+    fprintf(stderr, "%s: Start! boot=%s\n", name, boot);
+    int boot_num = atoi(boot);
+
+    if (boot_num != UBOOT && boot_num != BOOT0) {
+        return ErrorAbort(state, "%s: %d is not a boot num, expects 0 or 1  ("
+            "which respectively represents boot0 and uboot)"
+            ,name, boot_num);
+    }
+
+    free(boot);
+
+    if (boot_num==BOOT0)
+    {
+        char value[PROPERTY_VALUE_MAX];
+        property_get("ro.build.version.release", value, "");
+        double d=atof(value);
+        if (d<4.4)
+        {
+            printf("version is %f, do not update boot0\n",d);
+            return StringValue(strdup(""));
+        }
+        fprintf(((UpdaterInfo*)(state->cookie))->cmd_pipe,"ui_print %s\n", "Update boot0...");
+    }
+    if (boot_num==UBOOT)
+        fprintf(((UpdaterInfo*)(state->cookie))->cmd_pipe,"ui_print %s\n", "Update uboot...");
+    fprintf(((UpdaterInfo*)(state->cookie))->cmd_pipe, "ui_print\n");
+    char bootbin[256];
+    char dev_path[256];
+    int flash_type;
+    DeviceBurn burnFunc;
+    flash_type = getDeviceInfo(boot_num, dev_path, bootbin, &burnFunc);
+    if (flash_type == FLASH_TYPE_UNKNOW){
+        fprintf(stderr, "%s: This platform does not support burning "
+            "boot0\\uboot.\n", name);
+        return StringValue(strdup(""));
+    }
+
+    //Extract fex file to TMP_FEX_FILE_PATH
+    ZipArchive* za = ((UpdaterInfo*)(state->cookie))->package_zip;
+    const ZipEntry* entry = mzFindZipEntry(za, bootbin);
+    if (entry == NULL) {
+        fprintf(stderr, "%s: no %s in package\n", name, bootbin);
+        return StringValue(strdup(""));
+    }
+
+    FILE* f = fopen(TMP_FEX_FILE_PATH, "wb");
+    if (f == NULL) {
+        fprintf(stderr, "%s: can't open %s for write: %s\n",
+                name, TMP_FEX_FILE_PATH, strerror(errno));
+        return StringValue(strdup(""));
+    }
+    mzExtractZipEntryToFile(za, entry, fileno(f));
+    fclose(f);
+
+    int success = -1;
+    // free(filename);
+    BufferExtractCookie* cookie = malloc(sizeof(BufferExtractCookie));
+    if (!getBufferExtractCookieOfFile(TMP_FEX_FILE_PATH, cookie)) {
+        success = burnFunc(cookie, dev_path);
+        unlink(TMP_FEX_FILE_PATH);
+    } else {
+        bb_debug("open temp boot binary file failed!\n");
+    }
+    // free(bootexpr);
+    // free(devexpr);
+    free(cookie->buffer);
+    free(cookie);
+
+    return StringValue(strdup(success == -1? "":"t"));
+}
+
+Value* AssertBootVersionFn(const char* name, State* state, int argc, Expr* argv[]) {
+    if (argc != 1) {
+        return ErrorAbort(state, "%s() expects 1 arg, got %d", name, argc);
+    }
+    char *boot;
+    if (ReadArgs(state, argv, 1, &boot) < 0) return NULL;
+    double ota_boot_version = atof(boot);
+    // only check boot version when the boot version is configured when packing the image
+    if (ota_boot_version != 0) {
+        int fd=open("sys/nand_driver0/nand_debug",O_RDONLY);
+        if (fd<0&&ota_boot_version==1.0)
+            printf("device is boot_v%s and ota is boot_v%s ", "1.0" , boot);
+        else if (fd>0&&ota_boot_version==2.0)
+            printf("device is boot_v%s and ota is boot_v%s ", "2.0" , boot);
+        else
+        {
+            char *boot_v = fd < 0 ? "1.0" : "2.0";
+            if (fd>=0)
+                close(fd);
+            return ErrorAbort(state, "%s() device is boot_v%s , but ota is boot_v%s ", name, boot_v , boot);
+        }
+        if (fd>=0)
+            close(fd);
+    }
+    free(boot);
+    return StringValue(strdup("t"));
+}
+
 Value* Tune2FsFn(const char* name, State* state, int argc, Expr* argv[]) {
     if (argc == 0) {
         return ErrorAbort(state, "%s() expects args, got %d", name, argc);
@@ -1615,6 +1724,8 @@ void RegisterInstallFunctions() {
     RegisterFunction("ui_print", UIPrintFn);
 
     RegisterFunction("run_program", RunProgramFn);
+    RegisterFunction("burnboot", BurnBootFn);
+    RegisterFunction("assert_boot_version", AssertBootVersionFn);
 
     RegisterFunction("reboot_now", RebootNowFn);
     RegisterFunction("get_stage", GetStageFn);

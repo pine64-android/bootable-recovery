@@ -70,6 +70,9 @@ ScreenRecoveryUI::ScreenRecoveryUI() :
     menu_top(0),
     menu_items(0),
     menu_sel(0),
+    menu_max_lines(0),
+    menu_show_start(0),
+    menu_show_lines(0),
     animation_fps(20),
     installing_frames(-1),
     stage(-1),
@@ -216,11 +219,20 @@ void ScreenRecoveryUI::draw_screen_locked()
         int y = 0;
         int i = 0;
         if (show_menu) {
+            if (menu_items - menu_show_start > menu_max_lines) {
+                menu_show_lines = menu_max_lines;
+            } else {
+                menu_show_lines = menu_items - menu_show_start;
+            }
             SetColor(HEADER);
 
-            for (; i < menu_top + menu_items; ++i) {
-                if (i == menu_top) SetColor(MENU);
+            for (; i < menu_top ; ++i) {
+                if (i != 0 && menu[i][0]) gr_text(4, y, menu[i], i < menu_top);
+                y += char_height+4;
+            }
 
+            SetColor(MENU);
+            for (i = menu_top + menu_show_start; i < menu_top + menu_show_start + menu_show_lines; ++i) {
                 if (i == menu_top + menu_sel) {
                     // draw the highlight bar
                     SetColor(MENU_SEL_BG);
@@ -270,12 +282,12 @@ void ScreenRecoveryUI::update_screen_locked()
 // Should only be called with updateMutex locked.
 void ScreenRecoveryUI::update_progress_locked()
 {
-    if (show_text || !pagesIdentical) {
+/*    if (show_text || !pagesIdentical) {
         draw_screen_locked();    // Must redraw the whole screen
         pagesIdentical = true;
     } else {
         draw_progress_locked();  // Draw only the progress bar and overlays
-    }
+    }*/
     gr_flip();
 }
 
@@ -426,6 +438,8 @@ void ScreenRecoveryUI::SetProgressType(ProgressType type)
     progressScopeStart = 0;
     progressScopeSize = 0;
     progress = 0;
+    if(currentIcon == ERASING ||currentIcon == INSTALLING_UPDATE )
+    show_text =false;
     update_progress_locked();
     pthread_mutex_unlock(&updateMutex);
 }
@@ -500,21 +514,22 @@ void ScreenRecoveryUI::StartMenu(const char* const * headers, const char* const 
                                  int initial_selection) {
     int i;
     pthread_mutex_lock(&updateMutex);
-    if (text_rows > 0 && text_cols > 0) {
-        for (i = 0; i < text_rows; ++i) {
+    if (kMaxRows > 0 && text_cols > 0) {
+        for (i = 0; i < kMaxRows; ++i) {
             if (headers[i] == NULL) break;
             strncpy(menu[i], headers[i], text_cols-1);
             menu[i][text_cols-1] = '\0';
         }
         menu_top = i;
-        for (; i < text_rows; ++i) {
+        menu_max_lines = (gr_fb_height() - 4 * char_height) / (char_height + 4) - menu_top; // leave 4 lines for log
+        for (; i < kMaxRows; ++i) {
             if (items[i-menu_top] == NULL) break;
             strncpy(menu[i], items[i-menu_top], text_cols-1);
             menu[i][text_cols-1] = '\0';
         }
         menu_items = i - menu_top;
         show_menu = 1;
-        menu_sel = initial_selection;
+        menu_sel = menu_show_start = initial_selection;
         update_screen_locked();
     }
     pthread_mutex_unlock(&updateMutex);
@@ -528,6 +543,12 @@ int ScreenRecoveryUI::SelectMenu(int sel) {
         menu_sel = sel;
         if (menu_sel < 0) menu_sel = 0;
         if (menu_sel >= menu_items) menu_sel = menu_items-1;
+        if (menu_sel < menu_show_start && menu_show_start > 0) {
+            menu_show_start = menu_sel;
+        }
+        if (menu_sel - menu_show_start >= menu_max_lines) {
+            menu_show_start = menu_sel - menu_max_lines + 1;
+        }
         sel = menu_sel;
         if (menu_sel != old_sel) update_screen_locked();
     }
@@ -575,4 +596,15 @@ void ScreenRecoveryUI::Redraw()
     pthread_mutex_lock(&updateMutex);
     update_screen_locked();
     pthread_mutex_unlock(&updateMutex);
+}
+
+int* ScreenRecoveryUI::GetScreenPara()
+{
+  int *ScreenPara = new int[5];
+  ScreenPara[0] = menu_top;
+  ScreenPara[1] = menu_items;
+  ScreenPara[2] = char_height + 4;
+  ScreenPara[3] = menu_show_start;
+  ScreenPara[4] = menu_max_lines;
+  return ScreenPara;
 }

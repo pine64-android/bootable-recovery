@@ -28,6 +28,7 @@
 #include <sys/klog.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -48,6 +49,7 @@ extern "C" {
 #include "fuse_sideload.h"
 #include "fuse_sdcard_provider.h"
 }
+extern int insmodctp();
 
 struct selabel_handle *sehandle;
 
@@ -84,6 +86,8 @@ static const char *LAST_KMSG_FILE = "/cache/recovery/last_kmsg";
 
 // Number of lines per page when displaying a file on screen
 #define LINES_PER_PAGE 30
+
+#define KEEP_LOG_COUNT 10
 
 RecoveryUI* ui = NULL;
 char* locale = NULL;
@@ -531,6 +535,7 @@ get_menu_selection(const char* const * headers, const char* const * items,
         int key = ui->WaitKey();
         int visible = ui->IsTextVisible();
 
+        int action = 0;
         if (key == -1) {   // ui_wait_key() timed out
             if (ui->WasTextEverVisible()) {
                 continue;
@@ -539,9 +544,13 @@ get_menu_selection(const char* const * headers, const char* const * items,
                 ui->EndMenu();
                 return 0; // XXX fixme
             }
+        } else if (key <= Device::kHighlightUp && key >= Device::kInvokeItem) {
+            action = key;
+        } else {
+            action = device->HandleMenuKey(key, visible);
         }
 
-        int action = device->HandleMenuKey(key, visible);
+        //int action = device->HandleMenuKey(key, visible);
 
         if (action < 0) {
             switch (action) {
@@ -554,7 +563,17 @@ get_menu_selection(const char* const * headers, const char* const * items,
                     selected = ui->SelectMenu(selected);
                     break;
                 case Device::kInvokeItem:
-                    chosen_item = selected;
+                    if (ui->menu_select != -1) {
+                        if (selected==ui->menu_select) {
+                            chosen_item = ui->menu_select;
+                        } else {
+                            selected = ui->menu_select;
+                            selected = ui->SelectMenu(selected);
+                        }
+                        ui->menu_select = -1;
+                    } else {
+                        chosen_item = selected;
+                    }
                     break;
                 case Device::kNoAction:
                     break;
@@ -664,6 +683,7 @@ browse_directory(const char* path, Device* device) {
             // recurse down into a subdirectory
             new_path[strlen(new_path)-1] = '\0';  // truncate the trailing '/'
             result = browse_directory(new_path, device);
+            chosen_item = 0;
             if (result) break;
         } else {
             // selected a zip file: return the malloc'd path to the caller.
@@ -678,6 +698,31 @@ browse_directory(const char* path, Device* device) {
     free(headers);
 
     return result;
+}
+
+static int
+data_resume(){
+    printf("begin copy databk to data\n");
+    char *argv_execv[] = {"data_resume.sh", NULL};
+    ensure_path_mounted("/data");
+    ensure_path_mounted("/system");
+    pid_t pid = fork();
+    if (pid==0) {
+        execv("/system/bin/data_resume.sh", argv_execv);
+        _exit(-1);
+    }
+    int status;
+    waitpid(pid, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("Error (Status %d),fail to resume data\n", WEXITSTATUS(status));
+        ensure_path_unmounted("/data");
+        ensure_path_unmounted("/system");
+        return -1;
+    }
+    printf("copy databk to data succeed\n");
+    ensure_path_unmounted("/data");
+    ensure_path_unmounted("/system");
+    return 0;
 }
 
 static void
@@ -716,6 +761,7 @@ wipe_data(int confirm, Device* device) {
     device->WipeData();
     erase_volume("/data");
     erase_volume("/cache");
+    data_resume();
     ui->Print("Data wipe complete.\n");
 }
 
@@ -871,8 +917,8 @@ prompt_and_wait(Device* device, int status) {
                 break;
 
             case Device::APPLY_EXT: {
-                ensure_path_mounted(SDCARD_ROOT);
-                char* path = browse_directory(SDCARD_ROOT, device);
+                ensure_path_mounted(device->GetExternalStoragePath());
+                char* path = browse_directory(device->GetExternalStoragePath(), device);
                 if (path == NULL) {
                     ui->Print("\n-- No package file selected.\n", path);
                     break;
@@ -886,7 +932,87 @@ prompt_and_wait(Device* device, int status) {
                                              TEMPORARY_INSTALL_FILE, false);
 
                 finish_sdcard_fuse(token);
-                ensure_path_unmounted(SDCARD_ROOT);
+                ensure_path_unmounted(device->GetExternalStoragePath());
+
+                if (status == INSTALL_SUCCESS && wipe_cache) {
+                    ui->Print("\n-- Wiping cache (at package request)...\n");
+                    if (erase_volume("/cache")) {
+                        ui->Print("Cache wipe failed.\n");
+                    } else {
+                        ui->Print("Cache wipe complete.\n");
+                    }
+                }
+
+                if (status >= 0) {
+                    if (status != INSTALL_SUCCESS) {
+                        ui->SetBackground(RecoveryUI::ERROR);
+                        ui->Print("Installation aborted.\n");
+                    } else if (!ui->IsTextVisible()) {
+                        return Device::NO_ACTION;  // reboot if logs aren't visible
+                    } else {
+                        ui->Print("\nInstall from sdcard complete.\n");
+                    }
+                }
+                break;
+            }
+
+            case Device::APPLY_TF: {
+                ensure_path_mounted(device->GetExtsdStoragePath());
+                char* path = browse_directory(device->GetExtsdStoragePath(), device);
+                if (path == NULL) {
+                    ui->Print("\n-- No package file selected.\n", path);
+                    break;
+                }
+
+                ui->Print("\n-- Install %s ...\n", path);
+                set_sdcard_update_bootloader_message();
+                void* token = start_sdcard_fuse(path);
+
+                int status = install_package(FUSE_SIDELOAD_HOST_PATHNAME, &wipe_cache,
+                                             TEMPORARY_INSTALL_FILE, false);
+
+                finish_sdcard_fuse(token);
+                ensure_path_unmounted(device->GetExtsdStoragePath());
+
+                if (status == INSTALL_SUCCESS && wipe_cache) {
+                    ui->Print("\n-- Wiping cache (at package request)...\n");
+                    if (erase_volume("/cache")) {
+                        ui->Print("Cache wipe failed.\n");
+                    } else {
+                        ui->Print("Cache wipe complete.\n");
+                    }
+                }
+
+                if (status >= 0) {
+                    if (status != INSTALL_SUCCESS) {
+                        ui->SetBackground(RecoveryUI::ERROR);
+                        ui->Print("Installation aborted.\n");
+                    } else if (!ui->IsTextVisible()) {
+                        return Device::NO_ACTION;  // reboot if logs aren't visible
+                    } else {
+                        ui->Print("\nInstall from sdcard complete.\n");
+                    }
+                }
+                break;
+            }
+
+            case Device::APPLY_USB: {
+                ensure_path_mounted(device->GetUsbhostStoragePath());
+                char* path = browse_directory(device->GetUsbhostStoragePath(), device);
+                if (path == NULL) {
+                    ui->Print("\n-- No package file selected.\n", path);
+                    break;
+                }
+
+                ui->Print("\n-- Install %s ...\n", path);
+                set_sdcard_update_bootloader_message();
+                void* token = start_sdcard_fuse(path);
+
+                int status = install_package(FUSE_SIDELOAD_HOST_PATHNAME, &wipe_cache,
+                                             TEMPORARY_INSTALL_FILE, false);
+
+                finish_sdcard_fuse(token);
+                ensure_path_unmounted(device->GetUsbhostStoragePath());
 
                 if (status == INSTALL_SUCCESS && wipe_cache) {
                     ui->Print("\n-- Wiping cache (at package request)...\n");
@@ -1046,6 +1172,7 @@ main(int argc, char **argv) {
     ui = device->GetUI();
     gCurrentUI = ui;
 
+    insmodctp();
     ui->SetLocale(locale);
     ui->Init();
 
@@ -1121,6 +1248,7 @@ main(int argc, char **argv) {
         if (device->WipeData()) status = INSTALL_ERROR;
         if (erase_volume("/data")) status = INSTALL_ERROR;
         if (wipe_cache && erase_volume("/cache")) status = INSTALL_ERROR;
+        if (data_resume()) status = INSTALL_ERROR;
         if (status != INSTALL_SUCCESS) ui->Print("Data wipe failed.\n");
     } else if (wipe_cache) {
         if (wipe_cache && erase_volume("/cache")) status = INSTALL_ERROR;
@@ -1136,6 +1264,7 @@ main(int argc, char **argv) {
     }
     Device::BuiltinAction after = shutdown_after ? Device::SHUTDOWN : Device::REBOOT;
     if (status != INSTALL_SUCCESS || ui->IsTextVisible()) {
+        ui->ShowText(true);
         Device::BuiltinAction temp = prompt_and_wait(device, status);
         if (temp != Device::NO_ACTION) after = temp;
     }

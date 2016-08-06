@@ -38,6 +38,7 @@
 #include "ui.h"
 
 #define UI_WAIT_KEY_TIMEOUT_SEC    120
+#define ROTATION BOARD_RECOVERY_ROTATION
 
 // There's only (at most) one of these objects, and global callbacks
 // (for pthread_create, and the input event system) need to find it,
@@ -52,7 +53,9 @@ RecoveryUI::RecoveryUI() :
     enable_reboot(true),
     consecutive_power_keys(0),
     consecutive_alternate_keys(0),
-    last_key(-1) {
+    last_key(-1),
+    event_count(0),
+    move_pile(0) {
     pthread_mutex_init(&key_queue_mutex, NULL);
     pthread_cond_init(&key_queue_cond, NULL);
     self = this;
@@ -60,10 +63,111 @@ RecoveryUI::RecoveryUI() :
 }
 
 void RecoveryUI::Init() {
+    lastEvent.x = lastEvent.y = lastEvent.point_id = 0;
+    firstEvent.x = firstEvent.y = firstEvent.point_id = 0;
+    for (int i = 0; i < 5; i++) {
+         mTouchEvent[i].x = mTouchEvent[i].y = mTouchEvent[i].point_id = 0;
+    }
     ev_init(input_callback, NULL);
+	pthread_create(&event_t, NULL, watch_eventX_thread, NULL);
     pthread_create(&input_t, NULL, input_thread, NULL);
 }
 
+int RecoveryUI::menu_select(-1);
+
+int RecoveryUI::touch_handle_input(input_event ev){
+    int touch_code = 0;
+    int rotation = ROTATION;
+    if (ev.type == EV_ABS) {
+        switch(ev.code) {
+            case ABS_MT_TRACKING_ID:
+                lastEvent.point_id = ev.value;
+                event_count++;
+                break;
+
+            case ABS_MT_TOUCH_MAJOR:
+                if (ev.value == 0) {
+                }
+                break;
+
+            case ABS_MT_WIDTH_MAJOR:
+                break;
+
+            case ABS_MT_POSITION_X:
+                if (ev.value != 0) {
+                    if (90 == rotation) lastEvent.y = gr_fb_height() -ev.value;
+                    else if (180 == rotation) lastEvent.x = gr_fb_width() - ev.value;
+                    else if (270 == rotation) lastEvent.y = ev.value;
+                    else lastEvent.x = ev.value;
+                    event_count++;
+                }
+
+                break;
+            case ABS_MT_POSITION_Y:
+                if (ev.value != 0) {
+                    if (90 == rotation) lastEvent.x = ev.value;
+                    else if (180 == rotation) lastEvent.y = gr_fb_height() - ev.value;
+                    else if (270 == rotation) lastEvent.x = gr_fb_width() - ev.value;
+                    else lastEvent.y = ev.value;
+                    event_count++;
+                }
+
+                break;
+            default :
+                break;
+        }
+        return 1;
+    } else if (ev.type == EV_SYN) {
+        //the down events have been catch,now,deal with its
+        if (event_count == 3) {
+            if(firstEvent.y == 0) {
+                firstEvent.y = lastEvent.y;
+            }
+            if ((lastEvent.y - mTouchEvent[lastEvent.point_id].y) * move_pile < 0) {
+                move_pile = 0;
+                key_queue_len = 0;
+            } else if (lastEvent.y != 0) {
+                move_pile += lastEvent.y - mTouchEvent[lastEvent.point_id].y;
+            }
+            if (mTouchEvent[lastEvent.point_id].y == 0) {
+                mTouchEvent[lastEvent.point_id].y = lastEvent.y;
+            } else if ((lastEvent.y - mTouchEvent[lastEvent.point_id].y) > 20) {
+                touch_code = Device::kHighlightDown;
+                mTouchEvent[lastEvent.point_id].y = lastEvent.y;
+            } else if ((lastEvent.y - mTouchEvent[lastEvent.point_id].y) < -20) {
+                touch_code = Device::kHighlightUp;
+                mTouchEvent[lastEvent.point_id].y = lastEvent.y;
+            }
+        }
+        if (event_count == 0 && lastEvent.y != 0) { //the point move up
+            if ((firstEvent.y == lastEvent.y)) {
+                int *sreenPara = self->GetScreenPara();
+                int select = lastEvent.y / sreenPara[2] - sreenPara[0] + sreenPara[3];
+                if (select >= 0 && select < sreenPara[1] && select < sreenPara[3] + sreenPara[4]) {
+                    menu_select = select;
+                    touch_code = Device::kInvokeItem;
+                }
+            }
+            lastEvent.x = lastEvent.y = lastEvent.point_id = 0;
+            firstEvent.x = firstEvent.y = firstEvent.point_id = 0;
+            for (int i = 0; i < 5; i++) {
+                mTouchEvent[i].x = mTouchEvent[i].y = mTouchEvent[i].point_id = 0;
+            }
+        }
+        if (ev.code == 0 && ev.value == 0) {
+            event_count = 0;
+        }
+        pthread_mutex_lock(&key_queue_mutex);
+        const int queue_max = sizeof(key_queue) / sizeof(key_queue[0]);
+        if (key_queue_len < queue_max && touch_code != 0) {
+            key_queue[key_queue_len++] = touch_code;
+            pthread_cond_signal(&key_queue_cond);
+        }
+        pthread_mutex_unlock(&key_queue_mutex);
+        return 0;
+    }
+    return 0;
+}
 
 int RecoveryUI::input_callback(int fd, uint32_t epevents, void* data)
 {
@@ -73,6 +177,11 @@ int RecoveryUI::input_callback(int fd, uint32_t epevents, void* data)
     ret = ev_get_input(fd, epevents, &ev);
     if (ret)
         return -1;
+
+#ifdef BOARD_TOUCH_RECOVERY
+    if (self->touch_handle_input(ev))
+        return 0;
+#endif
 
     if (ev.type == EV_SYN) {
         return 0;
@@ -209,6 +318,23 @@ void* RecoveryUI::input_thread(void *cookie)
         if (!ev_wait(-1))
             ev_dispatch();
     }
+    return NULL;
+}
+
+void* RecoveryUI::watch_eventX_thread(void *cookie)
+{
+	if(ev_add_inotify()){
+		fprintf(stderr,"ev_add_inotify failed\n");
+		return NULL;
+	}
+
+    for (;;) {
+		if(ev_select()){
+			fprintf(stderr,"ev_select failed\n");
+			return NULL;
+		}
+    }
+
     return NULL;
 }
 

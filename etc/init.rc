@@ -24,6 +24,8 @@ on init
     mkdir /data
     mkdir /cache
     mkdir /sideload
+    mkdir /extsd
+    mkdir /usbhost
     mount tmpfs tmpfs /tmp
 
     chown root shell /tmp

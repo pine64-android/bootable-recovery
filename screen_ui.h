@@ -54,6 +54,7 @@ class ScreenRecoveryUI : public RecoveryUI {
                            int initial_selection);
     int SelectMenu(int sel);
     void EndMenu();
+    int* GetScreenPara();
 
     void Redraw();
 
@@ -96,7 +97,7 @@ class ScreenRecoveryUI : public RecoveryUI {
 
     char menu[kMaxRows][kMaxCols];
     bool show_menu;
-    int menu_top, menu_items, menu_sel;
+    int menu_top, menu_items, menu_sel, menu_max_lines, menu_show_start, menu_show_lines;
 
     pthread_t progress_t;
 

@@ -72,6 +72,40 @@ Volume* volume_for_path(const char* path) {
     return fs_mgr_get_entry_for_mount_point(fstab, path);
 }
 
+int ensure_ext_path_mounted(const char* path) {
+    // find path volumes and try to mount
+    if (!fstab) {
+        return -1;
+    }
+
+    int i;
+    Volume* v = NULL;
+    int retries = 15;
+    while (retries--) {
+        for (i = 0; i < fstab->num_entries; i++) {
+            if (strcmp(path, fstab->recs[i].mount_point) == 0) {
+                v = &fstab->recs[i];
+                int result = mount(v->blk_device, v->mount_point, v->fs_type,
+                               MS_NOATIME | MS_NODEV | MS_NODIRATIME, "");
+                if (result != 0)
+                    result = mount(v->blk_device, v->mount_point, "ntfs",
+                               MS_NOATIME | MS_NODEV | MS_NODIRATIME, "");
+                if (result == 0) return 0;
+            }
+        }
+        if (errno != 2) break;
+        LOGW("Failed to mount %s (%s, retries %d)\n",
+                path, strerror(errno), retries);
+        usleep(1000*1000);
+    }
+    LOGE("failed to mount %s (%s)\n", v->mount_point, strerror(errno));
+    return -1;
+}
+
+bool isExtVolume(Volume* v) {
+    return strcmp("/extsd", v->mount_point) == 0 || strcmp("/usbhost", v->mount_point) == 0;
+}
+
 int ensure_path_mounted(const char* path) {
     Volume* v = volume_for_path(path);
     if (v == NULL) {
@@ -90,14 +124,20 @@ int ensure_path_mounted(const char* path) {
         return -1;
     }
 
+    bool isExt = isExtVolume(v);
     const MountedVolume* mv =
         find_mounted_volume_by_mount_point(v->mount_point);
     if (mv) {
         // volume is already mounted
-        return 0;
+        if (isExt) unmount_mounted_volume(mv);
+        else return 0;
     }
 
     mkdir(v->mount_point, 0755);  // in case it doesn't already exist
+
+    if (isExt) {
+        return ensure_ext_path_mounted(v->mount_point);
+    }
 
     if (strcmp(v->fs_type, "yaffs2") == 0) {
         // mount an MTD partition as a YAFFS2 filesystem.
@@ -112,8 +152,17 @@ int ensure_path_mounted(const char* path) {
         return mtd_mount_partition(partition, v->mount_point, v->fs_type, 0);
     } else if (strcmp(v->fs_type, "ext4") == 0 ||
                strcmp(v->fs_type, "vfat") == 0) {
+        /**
+         * If the mount point is /system, add MS_RDONLY flag.
+         * Mount system partition without RDONLY flag will change the partition
+         * information, that will make signature checking fail on
+         * the signed image, eg: CTS application.
+         */
+        unsigned long flags = MS_NOATIME | MS_NODEV | MS_NODIRATIME;
+        if (strstr(v->mount_point, "/system"))
+            flags |= MS_RDONLY;
         result = mount(v->blk_device, v->mount_point, v->fs_type,
-                       MS_NOATIME | MS_NODEV | MS_NODIRATIME, "");
+                       flags, "");
         if (result == 0) return 0;
 
         LOGE("failed to mount %s (%s)\n", v->mount_point, strerror(errno));
@@ -260,6 +309,16 @@ int format_volume(const char* volume) {
         return 0;
     }
 
+    if (strcmp(v->fs_type, "vfat") == 0) {
+        int result = make_ext4fs(v->blk_device, v->length, volume, NULL); //not real format it setupfs will format it
+        if (result != 0) {
+            LOGE("format_volume: make_extf4fs failed on %s\n", v->blk_device);
+            return -1;
+        }
+        return 0;
+    }
+
+
     LOGE("format_volume: fs_type \"%s\" unsupported\n", v->fs_type);
     return -1;
 }
@@ -279,7 +338,8 @@ int setup_install_mounts() {
                 return -1;
             }
 
-        } else {
+        } else if (!isExtVolume(v) &&
+            strcmp(v->mount_point, "/data") != 0) {
             if (ensure_path_unmounted(v->mount_point) != 0) {
                 LOGE("failed to unmount %s\n", v->mount_point);
                 return -1;
