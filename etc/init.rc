@@ -18,6 +18,8 @@ on init
     mkdir /cache
     mkdir /sideload
     mount tmpfs tmpfs /tmp
+    mkdir extsd
+    mkdir usbhost
 
     chown root shell /tmp
     chmod 0775 /tmp

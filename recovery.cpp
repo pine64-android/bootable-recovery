@@ -50,6 +50,8 @@
 #include "fuse_sideload.h"
 #include "fuse_sdcard_provider.h"
 
+extern int insmodctp();
+
 struct selabel_handle *sehandle;
 
 static const struct option OPTIONS[] = {
@@ -185,6 +187,14 @@ check_and_fclose(FILE *fp, const char *name) {
     fclose(fp);
 }
 
+static void
+load_keeping_bootloader_message(struct bootloader_message *boot) {
+    struct bootloader_message temp;
+    memset(&temp, 0, sizeof(temp));
+    get_bootloader_message(&temp);
+    strlcpy(boot->stage, temp.stage, sizeof(boot->stage));
+}
+
 // command line args come from, in decreasing precedence:
 //   - the actual command line
 //   - the bootloader control block (one per line, after "recovery")
@@ -255,6 +265,7 @@ get_args(int *argc, char ***argv) {
         strlcat(boot.recovery, (*argv)[i], sizeof(boot.recovery));
         strlcat(boot.recovery, "\n", sizeof(boot.recovery));
     }
+    load_keeping_bootloader_message(&boot);
     set_bootloader_message(&boot);
 }
 
@@ -264,6 +275,7 @@ set_sdcard_update_bootloader_message() {
     memset(&boot, 0, sizeof(boot));
     strlcpy(boot.command, "boot-recovery", sizeof(boot.command));
     strlcpy(boot.recovery, "recovery\n", sizeof(boot.recovery));
+    load_keeping_bootloader_message(&boot);
     set_bootloader_message(&boot);
 }
 
@@ -398,6 +410,7 @@ finish_recovery(const char *send_intent) {
     // Reset to normal system boot so recovery won't cycle indefinitely.
     struct bootloader_message boot;
     memset(&boot, 0, sizeof(boot));
+    load_keeping_bootloader_message(&boot);
     set_bootloader_message(&boot);
 
     // Remove the command file, so recovery won't repeat indefinitely.
@@ -511,6 +524,7 @@ get_menu_selection(const char* const * headers, const char* const * items,
     ui->StartMenu(headers, items, initial_selection);
     int selected = initial_selection;
     int chosen_item = -1;
+    int touch_item = -1;
 
     while (chosen_item < 0) {
         int key = ui->WaitKey();
@@ -537,7 +551,16 @@ get_menu_selection(const char* const * headers, const char* const * items,
                     selected = ui->SelectMenu(++selected);
                     break;
                 case Device::kInvokeItem:
-                    chosen_item = selected;
+                    touch_item = ui->getTouchItem();
+                    if (touch_item != -1) {
+                        if (touch_item == selected) {
+                            chosen_item = selected;
+                        } else {
+                            selected = ui->SelectMenu(touch_item);
+                        }
+                    } else {
+                        chosen_item = selected;
+                    }
                     break;
                 case Device::kNoAction:
                     break;
@@ -747,15 +770,15 @@ static void choose_recovery_file(Device* device) {
     }
 }
 
-static int apply_from_sdcard(Device* device, bool* wipe_cache) {
+static int apply_from_external(Device* device, bool* wipe_cache, const char* root_dir) {
     modified_flash = true;
 
-    if (ensure_path_mounted(SDCARD_ROOT) != 0) {
-        ui->Print("\n-- Couldn't mount %s.\n", SDCARD_ROOT);
+    if (ensure_path_mounted(root_dir) != 0) {
+        ui->Print("\n-- Couldn't mount %s.\n", root_dir);
         return INSTALL_ERROR;
     }
 
-    char* path = browse_directory(SDCARD_ROOT, device);
+    char* path = browse_directory(root_dir, device);
     if (path == NULL) {
         ui->Print("\n-- No package file selected.\n");
         return INSTALL_ERROR;
@@ -769,8 +792,20 @@ static int apply_from_sdcard(Device* device, bool* wipe_cache) {
                                  TEMPORARY_INSTALL_FILE, false);
 
     finish_sdcard_fuse(token);
-    ensure_path_unmounted(SDCARD_ROOT);
+    ensure_path_unmounted(root_dir);
     return status;
+}
+
+static int apply_from_sdcard(Device* device, bool* wipe_cache) {
+    return apply_from_external(device, wipe_cache, device->GetExternalStoragePath());
+}
+
+static int apply_from_extsd(Device* device, bool* wipe_cache) {
+    return apply_from_external(device, wipe_cache, device->GetExtsdStoragePath());
+}
+
+static int apply_from_usb(Device* device, bool* wipe_cache) {
+    return apply_from_external(device, wipe_cache, device->GetUsbhostStoragePath());
 }
 
 // Return REBOOT, SHUTDOWN, or REBOOT_BOOTLOADER.  Returning NO_ACTION
@@ -822,12 +857,23 @@ prompt_and_wait(Device* device, int status) {
 
             case Device::APPLY_ADB_SIDELOAD:
             case Device::APPLY_SDCARD:
+            case Device::APPLY_TF:
+            case Device::APPLY_USB:
                 {
                     bool adb = (chosen_action == Device::APPLY_ADB_SIDELOAD);
+                    const char *from = "unknown";
                     if (adb) {
+                        from = "ADB";
                         status = apply_from_adb(ui, &should_wipe_cache, TEMPORARY_INSTALL_FILE);
-                    } else {
+                    } else if (chosen_action == Device::APPLY_SDCARD) {
+                        from = "External Storage";
                         status = apply_from_sdcard(device, &should_wipe_cache);
+                    } else if (chosen_action == Device::APPLY_TF) {
+                        from = "TF card Storage";
+                        status = apply_from_extsd(device, &should_wipe_cache);
+                    } else if (chosen_action == Device::APPLY_USB) {
+                        from = "USB Storage";
+                        status = apply_from_usb(device, &should_wipe_cache);
                     }
 
                     if (status == INSTALL_SUCCESS && should_wipe_cache) {
@@ -843,7 +889,7 @@ prompt_and_wait(Device* device, int status) {
                     } else if (!ui->IsTextVisible()) {
                         return Device::NO_ACTION;  // reboot if logs aren't visible
                     } else {
-                        ui->Print("\nInstall from %s complete.\n", adb ? "ADB" : "SD card");
+                        ui->Print("\nInstall from %s complete.\n", from);
                     }
                 }
                 break;
@@ -975,6 +1021,7 @@ main(int argc, char **argv) {
     ui = device->GetUI();
     gCurrentUI = ui;
 
+    insmodctp();
     ui->SetLocale(locale);
     ui->Init();
 

@@ -147,6 +147,7 @@ class FakeUI : public RecoveryUI {
                            int initial_selection) { }
     int SelectMenu(int sel) { return 0; }
     void EndMenu() { }
+    int getTouchItem() { return 0; }
 };
 
 void

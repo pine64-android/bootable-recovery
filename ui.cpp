@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -49,7 +50,14 @@ RecoveryUI::RecoveryUI()
           last_key(-1),
           has_power_key(false),
           has_up_key(false),
-          has_down_key(false) {
+          has_down_key(false),
+          event_count(0),
+          point_id(-1),
+          first_point_id(-1),
+          first_y(-1),
+          last_y(-1),
+          current_y(-1) {
+    current_touch_y = -1;
     pthread_mutex_init(&key_queue_mutex, nullptr);
     pthread_cond_init(&key_queue_cond, nullptr);
     memset(key_pressed, 0, sizeof(key_pressed));
@@ -69,6 +77,53 @@ int RecoveryUI::InputCallback(int fd, uint32_t epevents, void* data) {
     return reinterpret_cast<RecoveryUI*>(data)->OnInputEvent(fd, epevents);
 }
 
+static ev_callback watch_cb;
+static void* EventThreadLoop(void*) {
+    int ifd;
+    int wfd;
+    ifd = inotify_init();
+    if (ifd < 0) {
+        printf("inotify_init failed\n");
+        return nullptr;
+    }
+    wfd = inotify_add_watch(ifd, "/dev/input", IN_CREATE);
+    if (wfd < 0) {
+        printf("inotify_add_watch failed\n");
+        return nullptr;
+    }
+
+    int length = 0;
+    int event_pos;
+    char buffer[1024];
+    char ne_path[256];
+    struct inotify_event *ievent;
+    int new_fd;
+    while (true) {
+        length = read(ifd, buffer, sizeof(buffer));
+        if (length >= (int)sizeof(*ievent)) {
+            for (event_pos = 0; event_pos < length;) {
+                ievent = (struct inotify_event *)(buffer + event_pos);
+                if (ievent->len > 0) {
+                    if (ievent->mask & IN_CREATE) {
+                        snprintf(ne_path, sizeof(ne_path), "/dev/input/%s", ievent->name);
+                        printf("ne_path = %s\n", ne_path);
+                        new_fd = open(ne_path, O_RDONLY);
+                        if (new_fd < 0) {
+                            printf("open %s error, errno:%d\n", ne_path, errno);
+                        } else if (ev_add_fd(new_fd, watch_cb, nullptr)) {
+                            printf("ev_add_fd error\n");
+                        }
+                    }
+                    event_pos += ievent->len;
+                } else {
+                    printf("get inotify event error\n");
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // Reads input events, handles special hot keys, and adds to the key queue.
 static void* InputThreadLoop(void*) {
     while (true) {
@@ -84,6 +139,8 @@ void RecoveryUI::Init() {
 
     ev_iterate_available_keys(std::bind(&RecoveryUI::OnKeyDetected, this, std::placeholders::_1));
 
+    watch_cb = InputCallback;
+    pthread_create(&event_thread_, nullptr, EventThreadLoop, nullptr);
     pthread_create(&input_thread_, nullptr, InputThreadLoop, nullptr);
 }
 
@@ -92,6 +149,9 @@ int RecoveryUI::OnInputEvent(int fd, uint32_t epevents) {
     if (ev_get_input(fd, epevents, &ev) == -1) {
         return -1;
     }
+
+    if (OnInputTouchEvent(ev))
+        return 0;
 
     if (ev.type == EV_SYN) {
         return 0;
@@ -120,6 +180,70 @@ int RecoveryUI::OnInputEvent(int fd, uint32_t epevents) {
         ProcessKey(ev.code, ev.value);
     }
 
+    return 0;
+}
+
+int RecoveryUI::OnInputTouchEvent(input_event ev) {
+    if (ev.type == EV_ABS) {
+        switch(ev.code) {
+            case ABS_MT_TRACKING_ID:
+                point_id = ev.value;
+                if (first_point_id == -1)
+                    first_point_id = point_id;
+                event_count++;
+                break;
+
+            case ABS_MT_POSITION_X:
+                if (ev.value != 0) {
+                    event_count++;
+                }
+                break;
+
+            case ABS_MT_POSITION_Y:
+                if (ev.value != 0) {
+                    current_y = ev.value;
+                    event_count++;
+                }
+                break;
+
+            default:
+                break;
+        }
+        return 1;
+    } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
+        if (event_count == 3) {
+            if (point_id == first_point_id) {
+                if (first_y == -1)
+                    first_y = current_y;
+                if (last_y == -1)
+                    last_y = current_y;
+                if (current_y - last_y < -20) {
+                    EnqueueKey(KEY_UP);
+                    last_y = current_y;
+                } else if (current_y - last_y > 20) {
+                    EnqueueKey(KEY_DOWN);
+                    last_y = current_y;
+                }
+            }
+            event_count = 0;
+            return 1;
+        } else if (current_y != -1) {
+            if (point_id == first_point_id) {
+                if (first_y == current_y) {
+                    current_touch_y = first_y;
+                    EnqueueKey(KEY_ENTER);
+                }
+            }
+            event_count = 0;
+            point_id = first_y = last_y = current_y = -1;
+            return 1;
+        } else {
+            event_count = 0;
+            point_id = first_y = last_y = current_y = -1;
+        }
+    } else if (ev.type == EV_SYN && ev.code == SYN_MT_REPORT) {
+        return 1;
+    }
     return 0;
 }
 
@@ -197,7 +321,7 @@ void RecoveryUI::time_key(int key_code, int count) {
     bool long_press = false;
     pthread_mutex_lock(&key_queue_mutex);
     if (key_last_down == key_code && key_down_count == count) {
-        long_press = key_long_press = true;
+        //long_press = key_long_press = true;
     }
     pthread_mutex_unlock(&key_queue_mutex);
     if (long_press) KeyLongPress(key_code);

@@ -280,7 +280,9 @@ int setup_install_mounts() {
                 return -1;
             }
 
-        } else {
+        } else if (strcmp(v->mount_point, "/extsd") &&
+            strcmp(v->mount_point, "/usbhost") &&
+            strcmp(v->mount_point, "/data")) {
             if (ensure_path_unmounted(v->mount_point) != 0) {
                 LOGE("failed to unmount %s\n", v->mount_point);
                 return -1;

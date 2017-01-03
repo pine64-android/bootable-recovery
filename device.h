@@ -68,12 +68,21 @@ class Device {
         SHUTDOWN = 8,
         VIEW_RECOVERY_LOGS = 9,
         MOUNT_SYSTEM = 10,
+        APPLY_TF = 11,
+        APPLY_USB = 12,
     };
 
     // Return the list of menu items (an array of strings,
     // NULL-terminated).  The menu_position passed to InvokeMenuItem
     // will correspond to the indexes into this array.
     virtual const char* const* GetMenuItems();
+
+    // Return extnernal storage path
+    virtual const char* GetExternalStoragePath() { return "/data/media/0"; }
+    // Retrun extsd storage path
+    virtual const char* GetExtsdStoragePath() { return "/extsd"; }
+    // Retrun usbhost storage path
+    virtual const char* GetUsbhostStoragePath() { return "/usbhost"; }
 
     // Perform a recovery action selected from the menu.
     // 'menu_position' will be the item number of the selected menu

@@ -119,7 +119,10 @@ class RecoveryUI {
     // statements will be displayed.
     virtual void EndMenu() = 0;
 
+    virtual int getTouchItem() = 0;
+
 protected:
+    int current_touch_y;
     void EnqueueKey(int key_code);
 
 private:
@@ -141,18 +144,27 @@ private:
     bool has_up_key;
     bool has_down_key;
 
+    int event_count;
+    int point_id;
+    int first_point_id;
+    int first_y;
+    int last_y;
+    int current_y;
+
     struct key_timer_t {
         RecoveryUI* ui;
         int key_code;
         int count;
     };
 
+    pthread_t event_thread_;
     pthread_t input_thread_;
 
     void OnKeyDetected(int key_code);
 
     static int InputCallback(int fd, uint32_t epevents, void* data);
     int OnInputEvent(int fd, uint32_t epevents);
+    int OnInputTouchEvent(input_event ev);
     void ProcessKey(int key_code, int updown);
 
     bool IsUsbConnected();

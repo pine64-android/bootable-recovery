@@ -65,6 +65,7 @@ class ScreenRecoveryUI : public RecoveryUI {
         HEADER, MENU, MENU_SEL_BG, MENU_SEL_BG_ACTIVE, MENU_SEL_FG, LOG, TEXT_FILL, INFO
     };
     void SetColor(UIElement e);
+    int getTouchItem();
 
   private:
     Icon currentIcon;
@@ -102,6 +103,7 @@ class ScreenRecoveryUI : public RecoveryUI {
     const char* const* menu_headers_;
     bool show_menu;
     int menu_items, menu_sel;
+    int menu_y;
 
     // An alternate text screen, swapped with 'text_' when we're viewing a log file.
     char** file_viewer_text_;

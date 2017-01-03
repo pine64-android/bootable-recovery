@@ -35,6 +35,7 @@ LOCAL_SRC_FILES := \
     bootloader.cpp \
     device.cpp \
     fuse_sdcard_provider.c \
+    insmodctp.cpp \
     install.cpp \
     recovery.cpp \
     roots.cpp \

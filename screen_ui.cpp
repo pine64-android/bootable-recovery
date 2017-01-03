@@ -261,6 +261,7 @@ void ScreenRecoveryUI::draw_screen_locked() {
             SetColor(MENU);
             DrawHorizontalRule(&y);
             y += 4;
+            menu_y = y;
             for (int i = 0; i < menu_items; ++i) {
                 if (i == menu_sel) {
                     // Draw the highlight bar.
@@ -706,4 +707,12 @@ void ScreenRecoveryUI::KeyLongPress(int) {
     // Redraw so that if we're in the menu, the highlight
     // will change color to indicate a successful long press.
     Redraw();
+}
+
+int ScreenRecoveryUI::getTouchItem() {
+    if (current_touch_y == -1)
+        return -1;
+    int selectedMenu = current_touch_y - menu_y - 2;
+    current_touch_y = -1;
+    return selectedMenu / (char_height + 4);
 }
